@@ -20,69 +20,63 @@ app.post("/suggest", async (req, res) => {
     const { problem, code, cursor, language } = req.body;
 
     const prompt = `
-You are a coding coach providing inline ghost text.
+You are an advanced "Assistive Coding Coach". 
 
-ABSOLUTE RULES:
-- Output ONLY code
-- NO explanations
-- NO markdown
-- NO commentary
-- Do NOT repeat unchanged lines
-- Do NOT rewrite large sections
-- MAXIMUM 3 lines
+GOAL: 
+Help the user solve the stated problem by generating the code in "Logical Parts" (Chunks). 
 
-CRITICAL BEHAVIOR RULES:
-- You MAY complete the current line at the cursor
-- You MAY finish a block the user has clearly started
-- EVEN IF the suggestion completes the solution, you MUST return it
-- Prefer the SMALLEST possible continuation
-- If no reasonable continuation exists, return NOTHING
+BEHAVIOR:
+1. **Analyze the Code:** Look at what the user has written so far relative to the "Problem".
+2. **Determine the Next Step:** Identify the next immediate logical block needed (e.g., Imports, Class Definition, A specific Helper Function, The Main Loop).
+3. **Generate ONLY that Part:** Do not generate the rest of the file yet. Just the next logical chunk.
+4. **Assistive Comments:** Every line MUST have a short comment explaining the logic (Teaching mode).
+5. **Empty State:** If the code is empty, generate the first logical part (e.g., Imports and Setup).
 
-Problem:
-${problem}
+STRICT FORMATTING:
+- **SEPARATOR:** Use exactly TWO SPACES and a HASH: "  # " between code and comment.
+- **NO MARKDOWN:** Raw text only.
 
-Language:
-${language}
+FEW-SHOT EXAMPLES:
+Input Problem: "Create a snake game" (Empty code)
+Output: "import pygame  # Import game library\nimport random  # For random food placement\n\npygame.init()  # Initialize Pygame modules"
 
-Code so far:
-${code || "(empty)"}
+Input Problem: "Calculate factorial" (User wrote 'def factorial(n):')
+Output: "    if n == 0:  # Base case: factorial of 0 is 1\n        return 1  # Return result"
 
-Cursor:
-line ${cursor?.line ?? "?"}, column ${cursor?.column ?? "?"}
+CONTEXT:
+Language: ${language}
+Problem: ${problem}
 
-Ghost code:
+INPUT CODE:
+${code}
+
+CURSOR:
+Line ${cursor.lineNumber}, Column ${cursor.column}
+
+GENERATE NEXT LOGICAL PART:
 `;
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: prompt }]
-            }
-          ]
+          contents: [{ role: "user", parts: [{ text: prompt }] }]
         })
       }
     );
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error("❌ Gemini HTTP error:", errText);
       return res.json({ ghost: "" });
     }
 
     const data = await response.json();
-
-    const ghost =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    let ghost = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    ghost = ghost.replace(/```(python|js|javascript)?/g, "").replace(/```/g, "").trimEnd();
 
     res.json({ ghost });
+    
   } catch (err) {
     console.error("❌ Gemini server error:", err);
     res.json({ ghost: "" });

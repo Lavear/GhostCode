@@ -27,29 +27,27 @@ require(["vs/editor/editor.main"], function () {
   const model = editor.getModel();
   const tabSize = editor.getOption(monaco.editor.EditorOption.tabSize) || 4;
 
-  // =====================================================
-  // INLINE GHOST CLASS
-  // =====================================================
-
   class InlineGhost {
     constructor(editor) {
       this.editor = editor;
-
       this.lines = [];
       this.lineIndex = 0;
       this.colConsumed = 0;
-      this.isMismatch = false; // Track if user typed something wrong
-
+      this.isMismatch = false;
       this.anchorPosition = null;
       this.lockedPosition = null;
       this.nodes = [];
       this.indentText = "";
-
+      
       const fontInfo = editor.getOption(monaco.editor.EditorOption.fontInfo);
-
       this.fontInfo = fontInfo;
       this.charWidth = fontInfo.typicalHalfwidthCharacterWidth;
       this.lineHeight = fontInfo.lineHeight;
+    }
+
+    stripComment(text) {
+        if (!text) return "";
+        return text.split('  # ')[0]; 
     }
 
     createNode() {
@@ -61,7 +59,7 @@ require(["vs/editor/editor.main"], function () {
       node.style.fontFamily = this.fontInfo.fontFamily;
       node.style.fontSize = `${this.fontInfo.fontSize}px`;
       node.style.lineHeight = `${this.fontInfo.lineHeight}px`;
-      node.style.zIndex = "10"; // Ensure it sits above text
+      node.style.zIndex = "10"; 
       this.editor.getDomNode().appendChild(node);
       return node;
     }
@@ -77,54 +75,49 @@ require(["vs/editor/editor.main"], function () {
       const insertAt = this.lockedPosition.lineNumber;
       const needed = count - 1;
       if (needed <= 0) return;
-
-      model.applyEdits([
-        {
-          range: new monaco.Range(
-            insertAt,
-            model.getLineMaxColumn(insertAt),
-            insertAt,
-            model.getLineMaxColumn(insertAt)
-          ),
+      model.applyEdits([{
+          range: new monaco.Range(insertAt, model.getLineMaxColumn(insertAt), insertAt, model.getLineMaxColumn(insertAt)),
           text: "\n".repeat(needed),
           forceMoveMarkers: true
-        }
-      ]);
+      }]);
+    }
+
+    // --- NEW: APPEND METHOD (For F8) ---
+    append(newText) {
+       if (!newText) return;
+       const newLines = newText.replace(/\r/g, "").split("\n");
+       
+       // Add new lines to existing
+       this.lines = this.lines.concat(newLines);
+       
+       // Ensure editor has enough space
+       this.ensureLinesExist(this.lines.length);
+       
+       // Add new DOM nodes
+       newLines.forEach(() => this.nodes.push(this.createNode()));
+       
+       this.updatePosition();
     }
 
     show(text) {
       this.hide(false);
-
       this.lines = text.replace(/\r/g, "").split("\n");
       this.lineIndex = 0;
       this.colConsumed = 0;
       this.isMismatch = false;
-
       this.lockedPosition = this.editor.getPosition();
       this.anchorPosition = this.lockedPosition;
-
       this.computeIndent();
       this.ensureLinesExist(this.lines.length);
-
       this.editor.setPosition(this.lockedPosition);
       this.editor.focus();
-
-      this.lines.forEach(() => {
-        this.nodes.push(this.createNode());
-      });
-
+      this.lines.forEach(() => this.nodes.push(this.createNode()));
       this.updatePosition();
     }
 
     hide(restoreCaret = true) {
       this.nodes.forEach(n => n.remove());
       this.nodes = [];
-
-      if (restoreCaret && this.lockedPosition) {
-        // Optional: logic to restore caret if needed, 
-        // typically we just leave it where the user typed.
-      }
-
       this.lines = [];
       this.lineIndex = 0;
       this.colConsumed = 0;
@@ -132,40 +125,27 @@ require(["vs/editor/editor.main"], function () {
       this.anchorPosition = null;
       this.lockedPosition = null;
       this.indentText = "";
-      
-      // Update external state tracking if necessary
       if (window.ghostEnabled) window.ghostEnabled = false;
     }
 
-    // --- NEW: ACCEPT METHOD ---
     accept() {
       if (!this.anchorPosition) return;
-
-      // Construct the text to insert
-      // We take all remaining lines from the current lineIndex
-      // And slice the first line by what we have already consumed
-      const textToInsert = this.lines
-        .slice(this.lineIndex)
-        .join("\n")
-        .slice(this.colConsumed);
+      const rawRemainingLines = this.lines.slice(this.lineIndex);
+      const cleanLines = rawRemainingLines.map(line => this.stripComment(line));
+      const fullCleanText = cleanLines.join("\n");
+      const textToInsert = fullCleanText.slice(this.colConsumed);
 
       if (textToInsert) {
         this.editor.trigger('keyboard', 'type', { text: textToInsert });
       }
-      
       this.hide();
     }
 
     updatePosition() {
       if (!this.anchorPosition) return;
 
-      // 1. Get exact coordinates of the user's current cursor
-      // We use this to anchor the active line so it flows naturally
       const cursorPosition = this.editor.getPosition();
       const cursorCoords = this.editor.getScrolledVisiblePosition(cursorPosition);
-
-      // 2. Get the coordinates of Column 1 for the current ghost line
-      // We use this to anchor subsequent lines to preserve indentation
       const startOfLine = this.editor.getScrolledVisiblePosition({
         lineNumber: this.anchorPosition.lineNumber + this.lineIndex,
         column: 1
@@ -180,48 +160,35 @@ require(["vs/editor/editor.main"], function () {
         }
 
         const lineText = this.lines[i] ?? "";
+        const codeOnly = this.stripComment(lineText);
         
-        // Slice the ghost text based on what the user has typed
-        const visibleText =
-          i === this.lineIndex
-            ? lineText.slice(this.colConsumed)
-            : lineText;
+        // Vanishing Trick
+        if (i === this.lineIndex) {
+            if (this.colConsumed >= codeOnly.length && !this.isMismatch) {
+                 node.textContent = ""; 
+                 return;
+            }
+        }
 
+        const visibleText = i === this.lineIndex ? lineText.slice(this.colConsumed) : lineText;
         node.textContent = visibleText;
 
-        // --- STYLING (Mismatch vs Normal) ---
         if (this.isMismatch) {
-            node.style.color = "#ef1818"; // Red
+            node.style.color = "#ef1818"; 
             node.style.textDecoration = "line-through";
             node.style.opacity = "0.8";
         } else {
-            node.style.color = "#ff9c50"; // Grey
+            node.style.color = "#ff9c50"; 
             node.style.textDecoration = "none";
             node.style.opacity = "1.0";
         }
 
-        // --- POSITIONING ---
-        // Vertical
         const topOffset = (i - this.lineIndex) * this.lineHeight;
         node.style.top = `${cursorCoords.top + topOffset}px`;
 
-        // Horizontal
         if (i === this.lineIndex) {
-           // Active Line: Position exactly after the cursor
            node.style.left = `${cursorCoords.left}px`;
         } else {
-           // Subsequent Lines: Position based on Column 1 to match indentation
-           // We add indentation text length * char width if strictly needed,
-           // but normally indentation is part of the string in 'lines'.
-           
-           // However, since we used 'computeIndent' to pad the text visually 
-           // in the previous logic, we rely on 'startOfLine'.
-           // But remember: 'startOfLine' is Column 1. 
-           // If 'lines[i]' has spaces, they will render from Column 1.
-           
-           // Correct logic using your previous fix:
-           // If we are consuming characters on subsequent lines (rare, usually 0),
-           // we shift right.
            const left = startOfLine.left + (this.colConsumed * this.charWidth);
            node.style.left = `${left}px`;
         }
@@ -234,48 +201,32 @@ require(["vs/editor/editor.main"], function () {
       const pos = this.editor.getPosition();
       const expectedLine = this.lockedPosition.lineNumber + this.lineIndex;
 
-      // 1. Detect ENTER → move to next ghost line
       if (pos.lineNumber > expectedLine) {
         this.lineIndex++;
         this.colConsumed = 0;
-        this.isMismatch = false; // Reset mismatch on new line
+        this.isMismatch = false; 
         this.updatePosition();
         return;
       }
 
-      // 2. Detect Cursor moved away → hide
       if (pos.lineNumber < expectedLine) {
         this.hide();
         return;
       }
 
       const lineText = model.getLineContent(pos.lineNumber);
-
-      // Determine where the user started typing on this specific line
-      const baseColumn =
-        this.lineIndex === 0
-          ? this.lockedPosition.column - 1
-          : 0;
-
-      // Extract what the user has typed
+      const baseColumn = this.lineIndex === 0 ? this.lockedPosition.column - 1 : 0;
       const typed = lineText.slice(baseColumn, pos.column - 1);
       const ghostLine = this.lines[this.lineIndex] ?? "";
+      const codePart = this.stripComment(ghostLine);
 
-      // 3. Calculate Overlap
       let i = 0;
-      while (
-        i < typed.length &&
-        i < ghostLine.length &&
-        typed[i] === ghostLine[i]
-      ) {
+      while (i < typed.length && i < codePart.length && typed[i] === codePart[i]) {
         i++;
       }
 
-      // The consumption is the matching part
       this.colConsumed = i;
 
-      // 4. Check for Mismatch
-      // If user typed more characters than matched the ghost, it's a mismatch.
       if (typed.length > i) {
         this.isMismatch = true;
       } else {
@@ -287,68 +238,91 @@ require(["vs/editor/editor.main"], function () {
   }
 
   const ghost = new InlineGhost(editor);
-  // Expose ghostEnabled to window to track state if needed, 
-  // or just use a local variable managed by toggleGhost
   window.ghostEnabled = false;
 
-  // =====================================================
-  // CTRL + SPACE TOGGLE
-  // =====================================================
-
-  async function toggleGhost() {
-    if (window.ghostEnabled) {
-      ghost.hide(true);
-      window.ghostEnabled = false;
-      return;
-    }
-
-    const pos = editor.getPosition();
-    const code = editor.getValue();
-    const problem = document.getElementById("intent").value; // Ensure this element exists in your HTML
-
-    try {
+  // --- REUSABLE FETCH FUNCTION ---
+  async function fetchGhostText(currentCode, currentCursor) {
+     const problem = document.getElementById("intent").value; 
+     try {
         const res = await fetch("http://localhost:3000/suggest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             problem,
             language: "python",
-            code,
-            cursor: pos
+            code: currentCode,
+            cursor: currentCursor
           })
         });
-
         const data = await res.json();
+        return data.ghost && data.ghost.trim() ? data.ghost : null;
+     } catch (e) {
+        console.error(e);
+        return null;
+     }
+  }
 
-        if (data.ghost && data.ghost.trim()) {
-          ghost.show(data.ghost);
-          window.ghostEnabled = true;
-        }
-    } catch (e) {
-        console.error("Failed to fetch suggestion", e);
+  // --- TRIGGER: CTRL + SPACE ---
+  async function toggleGhost() {
+    if (window.ghostEnabled) {
+      ghost.hide(true);
+      window.ghostEnabled = false;
+      return;
+    }
+    
+    // Standard Request: Send current editor state
+    const text = await fetchGhostText(editor.getValue(), editor.getPosition());
+    if (text) {
+       ghost.show(text);
+       window.ghostEnabled = true;
     }
   }
 
-  editor.addCommand(
-    monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space,
-    toggleGhost
-  );
+  // --- TRIGGER: F8 (EXTEND) ---
+  async function extendGhost() {
+     if (!window.ghostEnabled || !ghost.lines.length) return;
 
-  // =====================================================
-  // NEW KEYBINDINGS: TAB & ESCAPE
-  // =====================================================
+     // 1. Construct "Projected" Code
+     // We assume the ghost text is appended at the cursor.
+     // (Simplification: just appending text to EOF or current block)
+     const originalCode = editor.getValue();
+     const ghostText = ghost.lines.join("\n");
+     
+     // NOTE: A robust implementation would insert ghostText exactly at cursor index.
+     // For now, we append it to the context sent to LLM to simulate it being there.
+     const combinedCode = originalCode + "\n" + ghostText;
+     
+     // 2. Calculate "Projected" Cursor
+     // We tell the LLM the cursor is at the END of the ghost text
+     const lines = combinedCode.split("\n");
+     const lastLineIndex = lines.length;
+     const lastLineLength = lines[lines.length - 1].length + 1;
+     
+     const projectedCursor = { lineNumber: lastLineIndex, column: lastLineLength };
 
-  // TAB: Accept Suggestion
+     // 3. Fetch Next Part
+     const nextPart = await fetchGhostText(combinedCode, projectedCursor);
+     
+     // 4. Append
+     if (nextPart) {
+         ghost.append("\n" + nextPart); // Add newline separation
+     }
+  }
+
+  // COMMANDS
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, toggleGhost);
+  
+  // F8 Keybinding
+  editor.addCommand(monaco.KeyCode.F8, extendGhost);
+
   editor.addCommand(monaco.KeyCode.Tab, function () {
     if (window.ghostEnabled && ghost.anchorPosition) {
       ghost.accept();
     } else {
-      // Pass Tab to default handler (indentation)
       editor.trigger('keyboard', 'tab', null);
     }
   });
 
-  // ESCAPE: Reject Suggestion
   editor.addCommand(monaco.KeyCode.Escape, function () {
     if (window.ghostEnabled && ghost.anchorPosition) {
       ghost.hide();
@@ -356,17 +330,9 @@ require(["vs/editor/editor.main"], function () {
     }
   });
 
-  // =====================================================
-  // EVENT LISTENERS
-  // =====================================================
-
   editor.onDidChangeModelContent((e) => {
-    // Check if we have a ghost active
-    if (window.ghostEnabled && ghost.anchorPosition) {
-       // Avoid running onType during the acceptance flush
-       if (!e.isFlush) {
-           ghost.onType();
-       }
+    if (window.ghostEnabled && ghost.anchorPosition && !e.isFlush) {
+       ghost.onType();
     }
   });
 
